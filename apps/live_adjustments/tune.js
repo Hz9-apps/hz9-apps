@@ -143,18 +143,43 @@ class TuneControl {
             tried.push(at);
             try { await this.bm3.identify(at); this.verified = true; return; } catch (e) {
                 if (!/marker absent|NRC/.test(String(e && e.message))) throw e;   // e.g. no answer, unknown ROM: as before
+                if (at === dflt) {                                            // kept for the diagnostic line
+                    const r = this.bm3.lastRead;
+                    this.bm3.lastDefault = r && r.address === dflt ? r.data : null;
+                    this.bm3.lastDefaultError = this.bm3.lastDefault ? null : String(e && e.message);
+                }
             }
         }
+        if (this._searchFailed) throw new Error(this._searchFailed);       // searched once this run: not again until a restart
         this.note = 'BM3: looking for the ROM marker on this DME…'; this.noteType = 'dim';
         this.log.info('BM3 marker not at ' + tried.join(', ') + ': searching (read only)');
         const found = await this.bm3.findMarker((done, total) => {
             this.note = 'BM3: looking for the ROM marker · ' + Math.round(100 * done / total) + '%';
         });
-        if (!found) throw new Error('BM3 CustomROM marker not found on this DME');
+        if (!found) {
+            const d = this._bm3Diag(dflt);
+            this.log.warn('BM3 marker search: ' + d);
+            this._searchFailed = 'BM3 marker not found · ' + d;
+            throw new Error(this._searchFailed);
+        }
         this.log.info('BM3 marker found at ' + found);
         await this.bm3.identify(found);
         this.verified = true;
         this._saveMarker(found);
+    }
+
+    /** One line for a photo of the screen: what the default address holds, and how the search went. */
+    _bm3Diag(dflt) {
+        const p = this.bm3, st = p.scanStats || {};
+        let at = 'no read';
+        if (p.lastDefault) {
+            const b = p.lastDefault.slice(0, 20);
+            at = Array.from(b).map((c) => (c >= 0x20 && c < 0x7F ? String.fromCharCode(c) : '.')).join('') +
+                ' (' + b.slice(0, 6).toString('hex').toUpperCase() + ')';
+        } else if (p.lastDefaultError) at = p.lastDefaultError;
+        const nrc = Object.keys(st.nrc || {}).map((k) => k + 'x' + st.nrc[k]).join(',');
+        return dflt + ': ' + at + ' · read ' + (st.read || 0) + ', refused ' + (st.refused || 0) + (nrc ? ' [' + nrc + ']' : '') +
+            ' · ' + Math.round((st.ms || 0) / 1000) + ' s';
     }
 
     _markerFile() { return this.ctx.dataDir ? path.join(this.ctx.dataDir, 'bm3_marker.json') : null; }
