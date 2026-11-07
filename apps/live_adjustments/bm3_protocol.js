@@ -3,6 +3,13 @@
 
 const DME = 0x12;
 const MARKER_SIZE = 0xFF;
+// Marker search: the last 8 KB of each likely MG1 (TriCore) program-flash bank, in 255-byte reads
+// that overlap by 0x3F, so a marker of up to 63 bytes is never cut in two.
+const SCAN_BANK_ENDS = [0x80800000, 0x80400000, 0x80C00000, 0x81000000, 0x80300000, 0x80600000, 0x80900000, 0x80F00000];
+const SCAN_STEP = 0xC0;
+const SCAN_WINDOWS = Math.ceil(0x2000 / SCAN_STEP);
+
+function hex32(n) { return ('00000000' + (n >>> 0).toString(16).toUpperCase()).slice(-8); }
 
 function addressBytes(value) {
     if (typeof value !== 'string' || !/^[0-9A-Fa-f]{8}$/.test(value)) throw new Error('invalid 32-bit address');
@@ -53,18 +60,62 @@ class Bm3Protocol {
         return positive(reply, sid, prefix);
     }
 
-    async identify() {
+    /** Read MARKER_SIZE bytes of DME memory at address (8 hex digits): define DID F301 on that
+     * memory (2C 02) and read it (22 F301). Read only. Resolves with the full 62 F3 01 reply. */
+    async readMarker(address) {
+        const addr = addressBytes(address);
+        await this.request(0x2C, [0x02, 0xF3, 0x01, 0x24].concat(addr, [0, MARKER_SIZE]), [0x02, 0xF3, 0x01]);
+        return this.request(0x22, [0xF3, 0x01], [0xF3, 0x01]);
+    }
+
+    /** address: where to read the marker (default: config.bm3MarkerAddress). */
+    async identify(address) {
         this.profile = null;
         this.rom = null;
-        const addr = addressBytes(this.config.bm3MarkerAddress);
-        await this.request(0x2C, [0x02, 0xF3, 0x01, 0x24].concat(addr, [0, MARKER_SIZE]), [0x02, 0xF3, 0x01]);
-        const marker = await this.request(0x22, [0xF3, 0x01], [0xF3, 0x01]);
+        this.markerAddress = null;
+        const at = address || this.config.bm3MarkerAddress;
+        const marker = await this.readMarker(at);
         const rom = markerRom(marker, this.profiles);
         const profile = this.profiles[rom];
         if (!profile || !profile.mapSwActAddr || profile.rom !== rom) throw new Error('BM3 profile unavailable');
         this.rom = rom;
         this.profile = profile;
-        return { rom };
+        this.markerAddress = String(at).toUpperCase();
+        return { rom, address: this.markerAddress };
+    }
+
+    /**
+     * The marker's place depends on the DME firmware: 807FFE50 (the default) was seen on a G22;
+     * another MG1 kept MHD's marker at 807FF750. Look for "BM3_R" near the end of each likely
+     * program-flash bank, read only (2C/22, no write, no session change), newest addresses first.
+     * A bank whose first read the DME refuses (it isn't there) is skipped. A transport error or
+     * no answer stops the search. onProgress(done, total). Resolves with the address where the
+     * marker starts (8 hex digits), or null.
+     */
+    async findMarker(onProgress) {
+        const total = SCAN_BANK_ENDS.length * SCAN_WINDOWS;
+        let done = 0;
+        for (const end of SCAN_BANK_ENDS) {
+            let refused = 0;
+            for (let i = 0; i < SCAN_WINDOWS; i++) {
+                const start = end - MARKER_SIZE - i * SCAN_STEP;
+                done++;
+                if (onProgress) onProgress(done, total);
+                let reply;
+                try {
+                    reply = await this.readMarker(hex32(start));
+                } catch (e) {
+                    if (!/NRC/.test(String(e && e.message))) throw e;      // no answer / no link: stop
+                    if (++refused >= 2 && i < 2) { done += SCAN_WINDOWS - 1 - i; break; }   // no such bank
+                    continue;
+                }
+                const data = Buffer.from(reply.slice(3));
+                const at = data.indexOf(Buffer.from('BM3_R'));
+                if (at >= 0) return hex32(start + at);
+            }
+        }
+        if (onProgress) onProgress(total, total);
+        return null;
     }
 
     ready() {
@@ -164,4 +215,4 @@ class Bm3Protocol {
     }
 }
 
-module.exports = { Bm3Protocol, markerRom, addressBytes, positive };
+module.exports = { Bm3Protocol, markerRom, addressBytes, positive, SCAN_BANK_ENDS };
