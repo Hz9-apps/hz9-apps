@@ -23,6 +23,8 @@
  *     MHD's marker sits at a ROM-dependent address, so it is not read: a press counts only
  *     when the DME echoes the request back. No read-back of the active map is known.
  */
+const fs = require('fs');
+const path = require('path');
 const { Bm3Protocol } = require('./bm3_protocol');
 const bm3Profiles = require('./bm3_profiles');
 
@@ -126,9 +128,44 @@ class TuneControl {
         this.log.info('tune: ' + this.tuner + (this.verified ? ' (ROM ' + this.bm3.rom + ')' : ''));
     }
 
+    /**
+     * Identify the BM3 ROM. The marker is read where it was last found on this car
+     * (data/bm3_marker.json), else at config.bm3MarkerAddress; if it isn't there, findMarker()
+     * looks for it (read only) and the place it is found is kept for next time. Writes still need
+     * the marker to name a known ROM, as before.
+     */
     async _identifyBm3() {
         if (!this.bm3) throw new Error('no diagnostic link');
-        if (!this.verified) { await this.bm3.identify(); this.verified = true; }
+        if (this.verified) return;
+        const saved = this._savedMarker(), dflt = String(this.bm3.config.bm3MarkerAddress || '').toUpperCase();
+        const tried = [];
+        for (const at of saved && saved !== dflt ? [saved, dflt] : [dflt]) {
+            tried.push(at);
+            try { await this.bm3.identify(at); this.verified = true; return; } catch (e) {
+                if (!/marker absent|NRC/.test(String(e && e.message))) throw e;   // e.g. no answer, unknown ROM: as before
+            }
+        }
+        this.note = 'BM3: looking for the ROM marker on this DME…'; this.noteType = 'dim';
+        this.log.info('BM3 marker not at ' + tried.join(', ') + ': searching (read only)');
+        const found = await this.bm3.findMarker((done, total) => {
+            this.note = 'BM3: looking for the ROM marker · ' + Math.round(100 * done / total) + '%';
+        });
+        if (!found) throw new Error('BM3 CustomROM marker not found on this DME');
+        this.log.info('BM3 marker found at ' + found);
+        await this.bm3.identify(found);
+        this.verified = true;
+        this._saveMarker(found);
+    }
+
+    _markerFile() { return this.ctx.dataDir ? path.join(this.ctx.dataDir, 'bm3_marker.json') : null; }
+    _savedMarker() {
+        try {
+            const a = JSON.parse(fs.readFileSync(this._markerFile(), 'utf8')).address;
+            return /^[0-9A-F]{8}$/.test(a) ? a : null;
+        } catch (e) { return null; }
+    }
+    _saveMarker(address) {
+        try { fs.writeFileSync(this._markerFile(), JSON.stringify({ address, rom: this.bm3.rom })); } catch (e) { this.log.warn('save BM3 marker: ' + e); }
     }
 
     async _readBurbles() {
