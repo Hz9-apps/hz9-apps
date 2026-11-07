@@ -4,7 +4,7 @@
  *
  *   Drive below 100 km/h -> ARMED. Floor it: the clock starts the moment you pass 100 and stops at 200.
  *   Crossings are interpolated between speed samples. Lifting (5 km/h under the run's peak) or
- *   dropping under 100 throws the run away. Other ranges (80-120, 100-150, 60-100) and mph in Settings.
+ *   dropping under 100 throws the run away. Other ranges (80-120, 100-150, 60-100, 200-250) and mph in Settings.
  *
  * Pages: live run  /  best times + recent runs (saved in data/wz_100200_runs.json)
  * Speed: Vehicle2.statusCarSpeed2 (centre-of-gravity speed: true speed, like a GPS box, not the speedo).
@@ -28,6 +28,7 @@ const RANGES = {
     r80_120: { kmh: { from: 80, to: 120, marks: [90, 100, 110] }, mph: { from: m(50), to: m(75), marks: [m(55), m(60), m(70)] } },
     r100_150: { kmh: { from: 100, to: 150, marks: [125] }, mph: { from: m(60), to: m(100), marks: [m(80)] } },
     r60_100: { kmh: { from: 60, to: 100, marks: [80] }, mph: { from: m(40), to: m(60), marks: [m(50)] } },
+    r200_250: { kmh: { from: 200, to: 250, marks: [225] }, mph: { from: m(125), to: m(155), marks: [m(140)] } },
 };
 
 mgu.run({
@@ -113,7 +114,7 @@ mgu.run({
             if (d !== feedDemo) { feedDemo = d; newTimer(); log.info(d ? 'demo data on' : 'live speed'); }
             const now = Date.now();
             if (!feedDemo) { timer.idle(now); return; }
-            const v = demo.speed(now);
+            const v = demo.speed(now, range());
             live.g = prevV === null ? 0 : (v - prevV) / 3.6 / 0.05 / 9.80665; prevV = v;
             live.speed = v;
             timer.feed(now, v);
@@ -217,13 +218,14 @@ mgu.run({
             const sh = G.panel(cv, t, 24, 44, 640, 468, 'Best times (' + vU() + ')'), ex = sh.y + sh.h - G.BOTTOM;
             G.button(cv, t, 664 - 20 - 200, 56, 200, 40, clearArmed ? 'Yes, clear' : 'Reset best', act, { key: 'clear', color: clearArmed ? t.crit : null });
             keys.forEach((k, i) => {
-                const y = Math.round(95 + (cv.extra ? 25 : 0) + i * (90 + Math.max(0, ex - 25) / 4)), b = store.best[bestKey(k)];
+                const rowH = 72;      // five tests in the panel (more room where the page reaches lower)
+                const y = Math.round(92 + (cv.extra ? 25 : 0) + i * (rowH + Math.max(0, ex - 25) / keys.length)), b = store.best[bestKey(k)];
                 const cur = k === rangeKey();
-                cv.text(rangeName(k, unit()) + ' ' + vU(), 48, y + 34, 28, cur ? t.text : t.dim, { font: 'bold' });
-                cv.text(b ? secs(b.s) : '--.--', 560, y + 40, 52, b ? t.accent2 : t.dim, { align: 'right', font: 'num' });
-                cv.text('s', 568, y + 40, 24, t.dim);
-                if (b) cv.text(when(b.at) + (G.isNum(b.dist) ? '  ·  ' + Math.round(b.dist) + ' m' : ''), 48, y + 63, 22, t.dim);
-                if (i < keys.length - 1) cv.fillRect(48, y + 76, 592, 1, withAlpha(t.tick, 0.35));
+                cv.text(rangeName(k, unit()) + ' ' + vU(), 48, y + 30, 26, cur ? t.text : t.dim, { font: 'bold' });
+                cv.text(b ? secs(b.s) : '--.--', 560, y + 38, 46, b ? t.accent2 : t.dim, { align: 'right', font: 'num' });
+                cv.text('s', 568, y + 38, 22, t.dim);
+                if (b) cv.text(when(b.at) + (G.isNum(b.dist) ? '  ·  ' + Math.round(b.dist) + ' m' : ''), 48, y + 56, 20, t.dim);
+                if (i < keys.length - 1) cv.fillRect(48, y + 64, 592, 1, withAlpha(t.tick, 0.35));
             });
 
             G.panel(cv, t, 688, 44, 888, 468, 'Recent runs');
