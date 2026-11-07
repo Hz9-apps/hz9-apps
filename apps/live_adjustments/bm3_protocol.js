@@ -3,11 +3,14 @@
 
 const DME = 0x12;
 const MARKER_SIZE = 0xFF;
-// Marker search: the last 8 KB of each likely MG1 (TriCore) program-flash bank, in 255-byte reads
-// that overlap by 0x3F, so a marker of up to 63 bytes is never cut in two.
-const SCAN_BANK_ENDS = [0x80800000, 0x80400000, 0x80C00000, 0x81000000, 0x80300000, 0x80600000, 0x80900000, 0x80F00000];
+// Marker search: the end of each likely MG1 (TriCore) program-flash bank (64 KB of the 8 MB one,
+// where the marker was seen; 8 KB of the others), in 255-byte reads that overlap by 0x3F, so a
+// marker of up to 63 bytes is never cut in two.
+const SCAN_AREAS = [[0x80800000, 0x10000], [0x80400000, 0x2000], [0x80C00000, 0x2000], [0x81000000, 0x2000],
+    [0x80300000, 0x2000], [0x80600000, 0x2000], [0x80900000, 0x2000], [0x80F00000, 0x2000]];
+const SCAN_BANK_ENDS = SCAN_AREAS.map((a) => a[0]);
 const SCAN_STEP = 0xC0;
-const SCAN_WINDOWS = Math.ceil(0x2000 / SCAN_STEP);
+const windows = (span) => Math.ceil(span / SCAN_STEP);
 
 function hex32(n) { return ('00000000' + (n >>> 0).toString(16).toUpperCase()).slice(-8); }
 
@@ -27,7 +30,7 @@ function positive(reply, sid, prefix) {
 function markerRom(reply, profiles) {
     positive(reply, 0x22, [0xF3, 0x01]);
     const data = Buffer.from(reply.slice(3));
-    if (data.indexOf(Buffer.from('BM3_R')) < 0) throw new Error('BM3 CustomROM marker absent');
+    if (data.indexOf(Buffer.from('BM3')) < 0) throw new Error('BM3 CustomROM marker absent');   // 'BM3_R...' on the ROMs seen so far
     const text = data.toString('latin1');
     const keys = Object.keys(profiles || {}).filter((key) => text.includes('#' + key));
     if (keys.length !== 1) throw new Error('BM3 ROM key not uniquely matched in marker');
@@ -65,7 +68,9 @@ class Bm3Protocol {
     async readMarker(address) {
         const addr = addressBytes(address);
         await this.request(0x2C, [0x02, 0xF3, 0x01, 0x24].concat(addr, [0, MARKER_SIZE]), [0x02, 0xF3, 0x01]);
-        return this.request(0x22, [0xF3, 0x01], [0xF3, 0x01]);
+        const reply = await this.request(0x22, [0xF3, 0x01], [0xF3, 0x01]);
+        this.lastRead = { address: String(address).toUpperCase(), data: Buffer.from(reply.slice(3)) };   // for the diagnostic line
+        return reply;
     }
 
     /** address: where to read the marker (default: config.bm3MarkerAddress). */
@@ -93,28 +98,43 @@ class Bm3Protocol {
      * marker starts (8 hex digits), or null.
      */
     async findMarker(onProgress) {
-        const total = SCAN_BANK_ENDS.length * SCAN_WINDOWS;
+        const total = SCAN_AREAS.reduce((n, a) => n + windows(a[1]), 0);
+        const keys = Object.keys(this.profiles || {}).map((k) => Buffer.from('#' + k));
+        const stats = this.scanStats = { read: 0, refused: 0, nrc: {}, ms: 0 };
+        const t0 = Date.now();
         let done = 0;
-        for (const end of SCAN_BANK_ENDS) {
-            let refused = 0;
-            for (let i = 0; i < SCAN_WINDOWS; i++) {
-                const start = end - MARKER_SIZE - i * SCAN_STEP;
-                done++;
-                if (onProgress) onProgress(done, total);
-                let reply;
-                try {
-                    reply = await this.readMarker(hex32(start));
-                } catch (e) {
-                    if (!/NRC/.test(String(e && e.message))) throw e;      // no answer / no link: stop
-                    if (++refused >= 2 && i < 2) { done += SCAN_WINDOWS - 1 - i; break; }   // no such bank
-                    continue;
+        const progress = () => { if (onProgress) onProgress(done, total); };
+        try {
+            for (const [end, span] of SCAN_AREAS) {
+                const n = windows(span);
+                let refused = 0;
+                for (let i = 0; i < n; i++) {
+                    const start = end - MARKER_SIZE - i * SCAN_STEP;
+                    done++;
+                    progress();
+                    let reply;
+                    try {
+                        reply = await this.readMarker(hex32(start));
+                    } catch (e) {
+                        const m = /NRC (\w+)/.exec(String(e && e.message));
+                        if (!m) throw e;                                       // no answer / no link: stop
+                        stats.refused++; stats.nrc[m[1]] = (stats.nrc[m[1]] || 0) + 1;
+                        if (++refused >= 2 && i < 2) { done += n - 1 - i; break; }   // no such bank
+                        continue;
+                    }
+                    stats.read++;
+                    const data = Buffer.from(reply.slice(3));
+                    const at = data.indexOf(Buffer.from('BM3_R'));
+                    if (at >= 0) return hex32(start + at);
+                    // a newer marker layout: the ROM key ("#R4C9...") with "BM3" somewhere before it
+                    for (const k of keys) {
+                        const kat = data.indexOf(k);
+                        if (kat >= 0) return hex32(start + kat - 0x80);          // 128 bytes before the key: the header
+                    }
                 }
-                const data = Buffer.from(reply.slice(3));
-                const at = data.indexOf(Buffer.from('BM3_R'));
-                if (at >= 0) return hex32(start + at);
             }
-        }
-        if (onProgress) onProgress(total, total);
+        } finally { stats.ms = Date.now() - t0; }
+        done = total; progress();
         return null;
     }
 
